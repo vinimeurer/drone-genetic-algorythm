@@ -15,34 +15,12 @@ import numpy as np
 import math
 import random
 import csv
-from deap import base, creator, tools
+import os
+from deap import base, creator, tools, algorithms
 from datetime import datetime, timedelta
 
-# Passo 1: Entender o objetivo
-# Objetivo: Otimizar a rota do drone para visitar CEPs em Curitiba, minimizando custo total (tempo + recargas),
-# respeitando bateria, ventos, horários e limite de 7 dias. Drone inicia e termina no CEP 82821020.
-
-# Passo 2: Coletar dados
-# Simulando dados de CEPs com coordenadas (latitude, longitude). Em um caso real, leia de um arquivo CSV.
-# CEP inicial: 82821020 (Unibrasil) - Coordenadas simuladas.
-ceps = [
-    {'cep': '82821020', 'lat': -25.4360, 'lon': -49.2710},  # Início/Fim
-    {'cep': '80000001', 'lat': -25.4300, 'lon': -49.2800},
-    {'cep': '80000002', 'lat': -25.4400, 'lon': -49.2600},
-    {'cep': '80000003', 'lat': -25.4500, 'lon': -49.2700},
-    {'cep': '80000004', 'lat': -25.4200, 'lon': -49.2900},
-    # Adicione mais CEPs simulados conforme necessário (ex: total 10 CEPs para teste)
-]
-num_ceps = len(ceps) - 1  # Excluindo o inicial
-
-# Simulando tabelas de ventos por dia/hora. Formato: dia (1-7), hora (0-23), velocidade (km/h), direção (graus).
-# Em real: Extraia de tabelas e converta unidades (ex: m/s para km/h).
-ventos = {}
-for dia in range(1, 8):
-    for hora in range(24):
-        ventos[(dia, hora)] = {'velocidade': random.uniform(0, 20), 'direcao': random.uniform(0, 360)}  # Placeholder
-
 # Parâmetros globais
+BASE_DIR = os.path.dirname(__file__)
 CEP_INICIAL = '82821020'
 HORARIO_INICIO = datetime.strptime('06:00:00', '%H:%M:%S').time()
 HORARIO_FIM = datetime.strptime('19:00:00', '%H:%M:%S').time()
@@ -54,6 +32,80 @@ CUSTO_RECARGA = 80  # R$
 CUSTO_EXTRA = 80  # Após 17:00
 RAIO_TERRA = 6371  # km para Haversine
 DIAS_MAX = 7
+
+# Passo 1: Entender o objetivo
+# Objetivo: Otimizar a rota do drone para visitar CEPs em Curitiba, minimizando custo total (tempo + recargas),
+# respeitando bateria, ventos, horários e limite de 7 dias. Drone inicia e termina no CEP 82821020.
+
+# Passo 2: Coletar dados
+# Simulando dados de CEPs com coordenadas (latitude, longitude). Em um caso real, leia de um arquivo CSV.
+# CEP inicial: 82821020 (Unibrasil) - Coordenadas simuladas.
+def ler_coordenadas(csv_path=None):
+    path = csv_path or os.path.join(BASE_DIR, 'coordenadas.csv')
+    ceps_local = []
+    with open(path, newline='', encoding='utf-8') as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            try:
+                cep = row['cep'].strip()
+                lon = float(row.get('longitude') or row.get('lon'))
+                lat = float(row.get('latitude') or row.get('lat'))
+                ceps_local.append({'cep': cep, 'lat': lat, 'lon': lon})
+            except Exception:
+                continue
+    return ceps_local
+
+# Simulando tabelas de ventos por dia/hora. Formato: dia (1-7), hora (0-23), velocidade (km/h), direção (graus).
+# Em real: Extraia de tabelas e converta unidades (ex: m/s para km/h).
+def ler_vento(csv_path=None):
+    path = csv_path or os.path.join(BASE_DIR, 'vento.csv')
+    v = {}
+    horas_por_dia = {}
+    with open(path, newline='', encoding='utf-8') as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            try:
+                dia = int(row['dia'])
+                hora = int(row['hora'])
+                vel = float(row.get('vel_kmh') or row.get('velocidade') or 0)
+                direc = float(row.get('direcao_deg') or row.get('direcao') or 0)
+                v[(dia, hora)] = {'velocidade': vel, 'direcao': direc}
+                horas_por_dia.setdefault(dia, set()).add(hora)
+            except Exception:
+                continue
+    return v, horas_por_dia
+
+
+def obter_vento(dia, hora):
+    """
+    Retorna vento exato se existir, senão retorna o registro da hora mais próxima no mesmo dia.
+    """
+    if (dia, hora) in ventos:
+        return ventos[(dia, hora)]
+    hours = sorted(list(horas_por_dia.get(dia, [])))
+    if not hours:
+        return {'velocidade': 0.0, 'direcao': 0.0}
+    closest = min(hours, key=lambda h: abs(h - hora))
+    return ventos[(dia, closest)]
+
+# Carregar dados dos CSVs
+ceps = ler_coordenadas()
+if not ceps:
+    raise FileNotFoundError("Arquivo coordenadas.csv não encontrado ou vazio em " + BASE_DIR)
+
+# Certificar que CEP_INICIAL está na posição 0
+idx_inicio = next((i for i, c in enumerate(ceps) if c['cep'] == CEP_INICIAL), None)
+if idx_inicio is None:
+    raise ValueError(f"CEP inicial {CEP_INICIAL} não encontrado em coordenadas.csv")
+if idx_inicio != 0:
+    ceps[0], ceps[idx_inicio] = ceps[idx_inicio], ceps[0]
+
+num_ceps = len(ceps) - 1
+
+ventos, horas_por_dia = ler_vento()
+
+
+
 
 # Passo 3: Calcular distâncias
 def calcular_distancia(lat1, lon1, lat2, lon2):
@@ -148,7 +200,7 @@ def funcao_fitness(individuo, verbose=False):
         
         # Pegar vento na hora atual (simplificação: usa hora inteira)
         hora_int = hora_atual.hour
-        vento = ventos.get((dia_atual, hora_int), {'velocidade': 0, 'direcao': 0})
+        vento = obter_vento(dia_atual, hora_int)
         
         tempo_voo = calcular_tempo(dist, vento['velocidade'], vento['direcao'], dir_voo)
         
@@ -183,6 +235,70 @@ def funcao_fitness(individuo, verbose=False):
         print(f"Custo total: {custo_total}, Dias: {dia_atual}, Recargas: {recargas}")
     return (custo_total,)
 
+
+# --- Adicionadas funções de validação e avaliação segura ---
+def validar_individuo(individuo):
+    """
+    Verifica se individuo é uma permutação válida de 1..(len(ceps)-1).
+    Retorna False se houver índices fora do intervalo ou elementos repetidos.
+    """
+    n = len(ceps) - 1
+    if not isinstance(individuo, (list, tuple)):
+        return False
+    if len(individuo) != n:
+        return False
+    # Todos os elementos devem ser inteiros no intervalo 1..n e sem repetição
+    try:
+        s = set(int(x) for x in individuo)
+    except Exception:
+        return False
+    return s == set(range(1, n+1))
+
+def avaliacao_segura(individuo):
+    """
+    Wrapper para funcao_fitness que valida e captura exceções.
+    Retorna (inf,) em caso de problema para penalizar.
+    """
+    try:
+        if not validar_individuo(individuo):
+            return (float('inf'),)
+        return funcao_fitness(individuo)
+    except Exception:
+        return (float('inf'),)
+# --- Adições: reparo e wrappers seguros para operadores genéticos ---
+def reparar_individuo(ind):
+    """Garante que 'ind' seja uma permutação válida; se não, substitui em-place."""
+    if validar_individuo(ind):
+        return
+    novo = criar_individuo()
+    # sobrescreve conteúdo do indivíduo em-place (DEAP espera isso)
+    ind[:] = novo
+
+def safe_cx_pmx(ind1, ind2):
+    """Wrapper seguro para cxPartialyMatched (PMX). Repara em caso de erro."""
+    try:
+        tools.cxPartialyMatched(ind1, ind2)
+    except Exception:
+        # substitui por indivíduos válidos caso ocorra erro
+        ind1[:] = criar_individuo()
+        ind2[:] = criar_individuo()
+    finally:
+        reparar_individuo(ind1)
+        reparar_individuo(ind2)
+    return ind1, ind2
+
+def safe_mut_shuffle(individual, indpb=0.2):
+    """Wrapper seguro para mutShuffleIndexes. Repara em caso de erro."""
+    try:
+        tools.mutShuffleIndexes(individual, indpb=indpb)
+    except Exception:
+        individual[:] = criar_individuo()
+    finally:
+        reparar_individuo(individual)
+    return (individual,)
+
+# --- Fim adições ---
+
 # Passo 8: Configurar operadores genéticos
 # Usando DEAP
 creator.create("FitnessMin", base.Fitness, weights=(-1.0,))
@@ -191,10 +307,14 @@ creator.create("Individual", list, fitness=creator.FitnessMin)
 toolbox = base.Toolbox()
 toolbox.register("individual", tools.initIterate, creator.Individual, criar_individuo)
 toolbox.register("population", tools.initRepeat, list, toolbox.individual)
-toolbox.register("mate", tools.cxPartialyMatched)  # Crossover para permutações
-toolbox.register("mutate", tools.mutShuffleIndexes, indpb=0.2)
+
+# substituir registros diretos por wrappers seguros
+toolbox.register("mate", safe_cx_pmx)
+toolbox.register("mutate", safe_mut_shuffle, indpb=0.2)
 toolbox.register("select", tools.selTournament, tournsize=3)
-toolbox.register("evaluate", funcao_fitness)
+# Substitui a avaliação direta por uma versão segura
+toolbox.register("evaluate", avaliacao_segura)
+
 
 # Passo 9: Executar o algoritmo
 def executar_algoritmo(pop_size=100, geracoes=50):
@@ -202,14 +322,21 @@ def executar_algoritmo(pop_size=100, geracoes=50):
     Executa o AG e retorna o melhor indivíduo.
     """
     pop = toolbox.population(n=pop_size)
+    # valida população inicial — se houver individuo inválido, substitui por novo
+    for i, ind in enumerate(pop):
+        if not validar_individuo(ind):
+            pop[i] = toolbox.individual()
+
     hof = tools.HallOfFame(1)
     
     # Estatísticas
     stats = tools.Statistics(lambda ind: ind.fitness.values)
     stats.register("min", np.min)
     
-    pop, log = tools.eaSimple(pop, toolbox, cxpb=0.7, mutpb=0.2, ngen=geracoes, stats=stats, halloffame=hof, verbose=True)
+    pop, log = algorithms.eaSimple(pop, toolbox, cxpb=0.7, mutpb=0.2, ngen=geracoes, stats=stats, halloffame=hof, verbose=True)
     
+    if len(hof) == 0:
+        return []
     return hof[0]
 
 # Passo 10: Gerar CSV
@@ -240,9 +367,12 @@ def gerar_csv(melhor_rota, arquivo='rota_otimizada.csv'):
 if __name__ == "__main__":
     try:
         melhor_ind = executar_algoritmo()
-        print("Melhor rota encontrada:", [ceps[i]['cep'] for i in melhor_ind])
-        funcao_fitness(melhor_ind, verbose=True)
-        gerar_csv(melhor_ind)
-        print("Arquivo CSV gerado: rota_otimizada.csv")
+        if not melhor_ind:
+            print("Nenhuma solução válida encontrada.")
+        else:
+            print("Melhor rota encontrada:", [ceps[i]['cep'] for i in melhor_ind])
+            funcao_fitness(melhor_ind, verbose=True)
+            gerar_csv(melhor_ind)
+            print("Arquivo CSV gerado: rota_otimizada.csv")
     except Exception as e:
         print(f"Erro na execução: {e}")

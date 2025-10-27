@@ -37,6 +37,7 @@ import math
 import random
 import csv
 import sys
+import os
 from datetime import datetime, timedelta, time
 from typing import List, Tuple, Dict, Any
 
@@ -60,33 +61,40 @@ random.seed(RANDOM_SEED)
 # -----------------------------
 def load_ceps() -> Tuple[Dict[str, Tuple[float, float]], str]:
     """
-    Carrega uma tabela de CEP -> (lat, lon).
-    Em ausência de arquivo real, retorna uma tabela simulada com coordenadas
-    aproximadas dentro de Curitiba.
-    Retorna:
-      - dict_cep_coords: {cep: (lat, lon)}
-      - cep_base: cep inicial/final obrigatório '82821020'
-    Nota didática: substituir por leitura de CSV se disponível.
+    Carrega CEP -> (lat, lon) a partir de 'coordenadas.csv' (se existir).
+    Caso o arquivo não exista ou haja erro, usa a tabela simulada (fallback).
+    Espera colunas: cep, longitude, latitude (ou variantes).
     """
-    # CEP base Unibrasil: 82821020 (simulado coordenadas)
+    csv_path = os.path.join(os.path.dirname(__file__), "coordenadas.csv")
     cep_base = "82821020"
-    dict_cep_coords = {
-        "82821020": (-25.4300, -49.2450),  # Unibrasil (base) - coordenadas simuladas
-        # Exemplos de CEPs em Curitiba (simulados para fins de teste)
-        "80010020": (-25.4278, -49.2731),
-        "80210010": (-25.4232, -49.2965),
-        "80510020": (-25.4367, -49.2700),
-        "80610200": (-25.4375, -49.2820),
-        "80730220": (-25.4530, -49.2620),
-        "81010240": (-25.5400, -49.2000),
-        "82010600": (-25.4700, -49.3100),
-        "82110230": (-25.4100, -49.3300),
-        "82410120": (-25.4800, -49.2000),
-        # Adicione mais se desejar...
-    }
-    # Garantir que base esteja presente
-    if cep_base not in dict_cep_coords:
-        dict_cep_coords[cep_base] = (-25.4300, -49.2450)
+    dict_cep_coords: Dict[str, Tuple[float, float]] = {}
+
+    if os.path.exists(csv_path):
+        try:
+            with open(csv_path, newline='', encoding='utf-8') as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    # tentar várias variantes de nomes de coluna
+                    cep = (row.get("cep") or row.get("CEP") or row.get("Cep") or "").strip()
+                    lat_s = (row.get("latitude") or row.get("lat") or row.get("Latitude") or "").strip()
+                    lon_s = (row.get("longitude") or row.get("lon") or row.get("Longitude") or "").strip()
+                    if not cep or not lat_s or not lon_s:
+                        continue
+                    try:
+                        lat = float(lat_s)
+                        lon = float(lon_s)
+                        dict_cep_coords[cep] = (lat, lon)
+                    except ValueError:
+                        # pular linhas com valores inválidos
+                        continue
+            # garantir base presente; se não, adicionar fallback próximo
+            if cep_base not in dict_cep_coords:
+                # se arquivo fornecido não contém o base, mantemos coordenada padrão razoável
+                dict_cep_coords[cep_base] = (-25.4300, -49.2450)
+            return dict_cep_coords, cep_base
+        except Exception as e:
+            print(f"[WARN] erro lendo {csv_path}, usando dados simulados: {e}")
+
     return dict_cep_coords, cep_base
 
 
@@ -114,20 +122,57 @@ def haversine_distance(a: Tuple[float, float], b: Tuple[float, float]) -> float:
 # -----------------------------
 def generate_wind_table(num_days: int = 7) -> Dict[int, Dict[int, Tuple[float, float]]]:
     """
-    Gera uma tabela de vento simulada: wind_table[day][hour] = (velocidade_m_s, direction_deg_from_north)
-    - day: 0..num_days-1
-    - hour: 0..23
-    Exemplo de modelagem simples: variação sinusoidal diurna.
-    Observação: sem internet, usamos valores plausíveis (0-8 m/s).
+    Gera/Carrega tabela de vento:
+      - se existir 'vento.csv' no mesmo diretório, carrega esse arquivo (espera colunas: dia,hora,vel_kmh,direcao_deg)
+      - caso contrário, gera tabela simulada (comportamento anterior).
+    Retorna wind_table[day_index][hour] = (vel_m_s, direction_deg)
     """
+    csv_path = os.path.join(os.path.dirname(__file__), "vento.csv")
+    if os.path.exists(csv_path):
+        wind_table: Dict[int, Dict[int, Tuple[float, float]]] = {}
+        try:
+            with open(csv_path, newline='', encoding='utf-8') as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    try:
+                        dia = int(row.get("dia") or row.get("day") or 0)
+                        hora = int(row.get("hora") or row.get("hour") or 0)
+                        vel_kmh = float(row.get("vel_kmh") or row.get("velocidade_kmh") or row.get("vel") or 0.0)
+                        direc = float(row.get("direcao_deg") or row.get("direction_deg") or row.get("direcao") or 0.0)
+                    except (ValueError, TypeError):
+                        continue
+                    day_index = max(0, dia - 1)
+                    if day_index not in wind_table:
+                        wind_table[day_index] = {}
+                    # converter km/h -> m/s
+                    wind_table[day_index][hora] = (vel_kmh / 3.6, direc % 360.0)
+            # preencher horas faltantes por cópia da hora mais próxima ou zeros
+            for d in list(wind_table.keys()):
+                hours_present = sorted(wind_table[d].keys())
+                if not hours_present:
+                    wind_table[d] = {h: (0.0, 0.0) for h in range(24)}
+                    continue
+                for h in range(24):
+                    if h not in wind_table[d]:
+                        # escolher hora mais próxima presente
+                        nearest = min(hours_present, key=lambda x: abs(x - h))
+                        wind_table[d][h] = wind_table[d][nearest]
+            # se número de dias menor que solicitado, repetir ciclicamente até num_days
+            if len(wind_table) < num_days:
+                for d in range(num_days):
+                    if d not in wind_table:
+                        wind_table[d] = wind_table[d % max(1, len(wind_table))]
+            return wind_table
+        except Exception as e:
+            print(f"[WARN] erro lendo {csv_path}, gerando tabela simulada: {e}")
+
+    # Fallback: geração simulada (comportamento original)
     wind_table = {}
     for d in range(num_days):
         wind_table[d] = {}
         for h in range(24):
-            # velocidade média varia por hora (mais vento à tarde)
-            base_speed = 2.0 + 3.0 * math.sin((h - 12) / 24.0 * 2 * math.pi)  # -1..1 scaled
-            speed = max(0.0, base_speed + random.uniform(-0.5, 1.5))  # m/s
-            # direção aleatória com leve tendência ao leste (90 deg)
+            base_speed = 2.0 + 3.0 * math.sin((h - 12) / 24.0 * 2 * math.pi)
+            speed = max(0.0, base_speed + random.uniform(-0.5, 1.5))
             direction = (90 + 30 * math.sin((d + h) / 10.0) + random.uniform(-45, 45)) % 360
             wind_table[d][h] = (speed, direction)
     return wind_table
