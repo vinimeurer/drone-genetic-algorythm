@@ -1,0 +1,100 @@
+# .gitignore for drone-genetic-algorythm
+# Generic
+.DS_Store
+Thumbs.db
+*.log
+*.tmp
+*.swp
+*.swo
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+.Python
+
+# Virtual environments
+venv/
+ENV/
+env/
+.venv/
+env.bak/
+venv.bak/
+
+# Packaging / distribution
+build/
+dist/
+*.egg-info/
+.installed.cfg
+pip-wheel-metadata/
+wheels/
+*.whl
+
+# Test / coverage
+.pytest_cache/
+coverage.xml
+.coverage
+htmlcov/
+
+# C extensions
+*.so
+
+# IDEs / editors
+.vscode/
+.idea/
+*.iml
+*.code-workspace
+*.sublime-project
+*.sublime-workspace
+
+# Jupyter
+.ipynb_checkpoints
+
+# Notebook / IPython
+profile_default/
+ipython_config.py
+
+# OS / environment
+.env
+.env.*
+*.pem
+*.key
+*.crt
+
+# Node (if present)
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Data, models, experiments (common for ML / robotics projects)
+data/
+data_raw/
+results/
+logs/
+output/
+models/
+checkpoints/
+*.ckpt
+*.pth
+*.pt
+*.h5
+*.joblib
+
+# Build artifacts
+*.o
+*.obj
+*.exe
+*.dll
+*.class
+
+# Documentation
+docs/_build/
+
+# Misc
+celerybeat-schedule
+celerybeat.pid
+docker-compose.override.yml
