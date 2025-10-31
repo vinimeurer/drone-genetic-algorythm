@@ -62,8 +62,7 @@ random.seed(RANDOM_SEED)
 def load_ceps() -> Tuple[Dict[str, Tuple[float, float]], str]:
     """
     Carrega CEP -> (lat, lon) a partir de 'coordenadas.csv' (se existir).
-    Caso o arquivo não exista ou haja erro, usa a tabela simulada (fallback).
-    Espera colunas: cep, longitude, latitude (ou variantes).
+    Versão mais robusta: imprime contagem e amostra para debugging.
     """
     csv_path = os.path.join(os.path.dirname(__file__), "coordenadas.csv")
     cep_base = "82821020"
@@ -73,28 +72,42 @@ def load_ceps() -> Tuple[Dict[str, Tuple[float, float]], str]:
         try:
             with open(csv_path, newline='', encoding='utf-8') as f:
                 reader = csv.DictReader(f)
+                row_count = 0
                 for row in reader:
-                    # tentar várias variantes de nomes de coluna
-                    cep = (row.get("cep") or row.get("CEP") or row.get("Cep") or "").strip()
+                    row_count += 1
+                    cep_raw = (row.get("cep") or row.get("CEP") or row.get("Cep") or "").strip()
                     lat_s = (row.get("latitude") or row.get("lat") or row.get("Latitude") or "").strip()
                     lon_s = (row.get("longitude") or row.get("lon") or row.get("Longitude") or "").strip()
-                    if not cep or not lat_s or not lon_s:
+                    if not cep_raw or not lat_s or not lon_s:
+                        continue
+                    # normalizar CEP: manter apenas dígitos (evita floats/formatos estranhos)
+                    cep = "".join(ch for ch in cep_raw if ch.isdigit())
+                    if not cep:
                         continue
                     try:
                         lat = float(lat_s)
                         lon = float(lon_s)
                         dict_cep_coords[cep] = (lat, lon)
                     except ValueError:
-                        # pular linhas com valores inválidos
                         continue
+            # debug: mostrar quantos lidos e primeiras/últimas 5 chaves
+            total = len(dict_cep_coords)
+            print(f"[DEBUG] lidas {row_count} linhas do CSV; {total} CEPs válidos carregados.")
+            if total > 0:
+                keys = list(dict_cep_coords.keys())
+                sample_start = keys[:5]
+                sample_end = keys[-5:]
+                print(f"[DEBUG] amostra início: {sample_start}")
+                print(f"[DEBUG] amostra fim: {sample_end}")
             # garantir base presente; se não, adicionar fallback próximo
             if cep_base not in dict_cep_coords:
-                # se arquivo fornecido não contém o base, mantemos coordenada padrão razoável
                 dict_cep_coords[cep_base] = (-25.4300, -49.2450)
+                print(f"[WARN] CEP base {cep_base} não encontrado no CSV — usando coordenada fallback.")
             return dict_cep_coords, cep_base
         except Exception as e:
             print(f"[WARN] erro lendo {csv_path}, usando dados simulados: {e}")
 
+    print(f"[WARN] arquivo {csv_path} não encontrado — usando dados simulados (vazio).")
     return dict_cep_coords, cep_base
 
 
@@ -648,6 +661,44 @@ def save_route_csv(filename: str, base_cep: str, cep_coords: Dict[str, Tuple[flo
             ])
     print(f"[IO] CSV salvo em: {filename}")
 
+# --- novo: constrói log simples a partir da sequência (fallback) ---
+def build_fallback_log(solution: List[str], cep_coords: Dict[str, Tuple[float, float]],
+                       wind_table: Dict[int, Dict[int, Tuple[float, float]]],
+                       speed_ms: float = CRUISE_SPEED_MS) -> List[Dict[str, Any]]:
+    """
+    Constrói um route_log simplificado para salvar/plotar quando simulate_route
+    abortou antes de completar todos os pontos. Usa travel_time_and_energy para
+    estimar tempos (mas não força recargas/viabilidade).
+    """
+    log = []
+    current_loc = cep_coords[BASE_CEP]
+    current_time = START_DATE
+    battery = AUTONOMIA_SEC
+    total_recharge_cost = 0.0
+
+    for next_cep in (solution + [BASE_CEP]):
+        dest = cep_coords[next_cep]
+        time_sec, energy_needed = travel_time_and_energy(current_loc, dest, current_time, wind_table, speed_ms)
+        arrival_time = current_time + timedelta(seconds=time_sec)
+        # atualizar bateria de forma simples (não modela recargas)
+        battery = max(0, battery - energy_needed)
+        rec = {
+            "from_cep": None,
+            "cep": next_cep,
+            "lat": dest[0],
+            "lon": dest[1],
+            "day": (arrival_time.date() - START_DATE.date()).days,
+            "arrival_time": arrival_time,
+            "departure_time": arrival_time,
+            "time_sec": math.ceil(time_sec),
+            "battery_remain": math.ceil(battery),
+            "cost_so_far": math.ceil(total_recharge_cost)
+        }
+        log.append(rec)
+        current_loc = dest
+        current_time = arrival_time
+    return log
+
 
 # -----------------------------
 # MAIN: execução e organização
@@ -705,10 +756,16 @@ def main():
         print("[RESULT] Nenhuma solução encontrada.")
         sys.exit(1)
 
-    # Apresentar resultado resumido
-    print("\n[RESULT] Melhor rota encontrada (sequência de CEPs):")
-    print("Início no base ->", " -> ".join(best_solution), "->", base_cep)
-    print(f"[RESULT] Custo total (tempo equiv. s + custo recargas convertido): {best_cost:.2f}")
+    # Se a simulação retornou um log parcial (inviável), gerar fallback completo para saída/plot
+    expected_visits = len(cep_coords) - 1  # exclui base
+    if len(best_log) < expected_visits + 1:  # +1 inclui retorno à base
+        print(f"[WARN] simulate_route gerou {len(best_log)} registros; esperado ~{expected_visits+1}. Gerando fallback log completo.")
+        fallback = build_fallback_log(best_solution, cep_coords, wind_table)
+        # só substitui se fallback tem todos os pontos
+        if len(fallback) >= expected_visits + 1:
+            best_log = fallback
+        else:
+            print("[WARN] fallback não gerou registro completo. CSV pode continuar parcial.")
 
     # 10) Gerar CSV
     output_csv = "rota_drone_saida.csv"
